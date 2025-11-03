@@ -291,17 +291,16 @@ export default function AutoRoutePlannerModal({
                                 </p>
                             </div>
 
-                            {progress.status === 'finding_route' && progress.apiCallsUsed !== undefined && (
+                            {progress.status === 'finding_route' && (
                                 <div className="mt-2">
                                     <div className="flex justify-between text-xs text-gray-600 mb-1">
                                         <span>Progress</span>
-                                        <span>{progress.apiCallsUsed} API calls used</span>
                                     </div>
                                     <div className="w-full bg-gray-200 rounded-full h-2">
                                         <div
-                                            className="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                                            className="bg-purple-600 h-2 rounded-full transition-all duration-300 animate-pulse"
                                             style={{
-                                                width: `${Math.min((progress.apiCallsUsed || 0) * 33, 100)}%`,
+                                                width: '100%',
                                             }}
                                         ></div>
                                     </div>
