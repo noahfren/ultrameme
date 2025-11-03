@@ -43,9 +43,9 @@ npx tsx scripts/test-route-finder.ts
 
 2. **Runs the route finder algorithm:**
    - Searches for nearby Taco Bells within 15 miles
-   - Uses beam search to find optimal routes
+   - Uses greedy nearest-neighbor algorithm to find optimal routes
    - Validates routes using Google Directions API
-   - Finds a route with 8-10 Taco Bells totaling 30-34 miles
+   - Finds a route with 8-10 Taco Bells totaling 50-55km (31-34 miles)
 
 3. **Displays results:**
    - Lists all Taco Bells in the route

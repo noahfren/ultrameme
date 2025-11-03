@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Location, TacoBellLocation, RouteSearchProgress } from '@/types';
+import { Location, TacoBellLocation, RouteSearchProgress, RouteFinderConfig } from '@/types';
 import { findOptimalRoute } from '@/lib/routeFinder';
 import { validateTacoBell } from '@/lib/googleMaps';
 import LocationSearch from './LocationSearch';
@@ -22,6 +22,9 @@ export default function AutoRoutePlannerModal({
     const [progress, setProgress] = useState<RouteSearchProgress | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [isValidTacoBell, setIsValidTacoBell] = useState(false);
+    const [minTacoBells, setMinTacoBells] = useState(8);
+    const [maxTacoBells, setMaxTacoBells] = useState(10);
+    const [configError, setConfigError] = useState<string | null>(null);
 
     // Reset state when modal opens/closes
     useEffect(() => {
@@ -31,6 +34,9 @@ export default function AutoRoutePlannerModal({
             setProgress(null);
             setError(null);
             setIsValidTacoBell(false);
+            setMinTacoBells(8);
+            setMaxTacoBells(10);
+            setConfigError(null);
         }
     }, [isOpen]);
 
@@ -71,6 +77,7 @@ export default function AutoRoutePlannerModal({
                                     lat: result.tacoBell.lat,
                                     lng: result.tacoBell.lng,
                                     address: result.tacoBell.address,
+                                    name: result.tacoBell.name,
                                 });
                             }
                         }
@@ -88,6 +95,30 @@ export default function AutoRoutePlannerModal({
             };
         }
     }, [selectedLocation]);
+
+    // Validate Taco Bell count configuration
+    useEffect(() => {
+        const errorMessages: string[] = [];
+
+        if (minTacoBells < 2) {
+            errorMessages.push('Minimum Taco Bells must be at least 2');
+        }
+        if (minTacoBells > 20) {
+            errorMessages.push('Minimum Taco Bells cannot exceed 20');
+        }
+        if (maxTacoBells > 20) {
+            errorMessages.push('Maximum Taco Bells cannot exceed 20');
+        }
+        if (minTacoBells > maxTacoBells) {
+            errorMessages.push('Minimum must be less than or equal to maximum');
+        }
+
+        if (errorMessages.length > 0) {
+            setConfigError(errorMessages.join('. '));
+        } else {
+            setConfigError(null);
+        }
+    }, [minTacoBells, maxTacoBells]);
 
     const handleSearch = async () => {
         if (!selectedLocation || !isValidTacoBell) return;
@@ -118,7 +149,14 @@ export default function AutoRoutePlannerModal({
             };
 
             console.log('[AutoRouteModal] Calling findOptimalRoute');
-            const result = await findOptimalRoute(startTacoBell, undefined, (prog) => {
+            const config: RouteFinderConfig = {
+                minDistanceMeters: 50000, // 50km hard minimum
+                maxDistanceMeters: 55000,
+                minTacoBells,
+                maxTacoBells,
+                searchRadiusMiles: 15,
+            };
+            const result = await findOptimalRoute(startTacoBell, config, (prog) => {
                 setProgress(prog);
             });
 
@@ -178,8 +216,8 @@ export default function AutoRoutePlannerModal({
                     {/* Explanation */}
                     <div className="bg-gray-50 rounded-lg p-4">
                         <p className="text-sm text-gray-700">
-                            This tool automatically generates a circular 50K (30-34 mile) route
-                            visiting 8-10 unique Taco Bell locations within 15 miles of your starting
+                            This tool automatically generates a circular 50K (31-34 mile) route
+                            visiting unique Taco Bell locations within 15 miles of your starting
                             point. The algorithm uses a heuristic search to find an optimal looped route
                             that avoids backtracking and maximizes geographical spread.
                         </p>
@@ -199,6 +237,49 @@ export default function AutoRoutePlannerModal({
                             <p className="text-sm text-red-600 mt-2">{error}</p>
                         )}
                     </div>
+
+                    {/* Route Configuration */}
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                Minimum Taco Bells
+                            </label>
+                            <input
+                                type="number"
+                                min="2"
+                                max="20"
+                                value={minTacoBells}
+                                onChange={(e) => {
+                                    const val = parseInt(e.target.value);
+                                    setMinTacoBells(isNaN(val) ? 0 : val);
+                                }}
+                                disabled={isSearching}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:bg-gray-100 disabled:cursor-not-allowed text-black"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                Maximum Taco Bells
+                            </label>
+                            <input
+                                type="number"
+                                min="2"
+                                max="20"
+                                value={maxTacoBells}
+                                onChange={(e) => {
+                                    const val = parseInt(e.target.value);
+                                    setMaxTacoBells(isNaN(val) ? 0 : val);
+                                }}
+                                disabled={isSearching}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:bg-gray-100 disabled:cursor-not-allowed text-black"
+                            />
+                        </div>
+                    </div>
+                    {configError && (
+                        <p className="text-sm text-red-600 mt-2">
+                            {configError}
+                        </p>
+                    )}
 
                     {/* Progress Display */}
                     {isSearching && progress && (
@@ -249,18 +330,18 @@ export default function AutoRoutePlannerModal({
                         </button>
                         <button
                             onClick={handleSearch}
-                            disabled={!selectedLocation || !isValidTacoBell || isSearching}
+                            disabled={!selectedLocation || !isValidTacoBell || isSearching || !!configError}
                             className="px-4 py-2 text-white rounded-lg transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                             style={{
-                                backgroundColor: selectedLocation && isValidTacoBell && !isSearching ? '#36399a' : '#9ca3af',
+                                backgroundColor: selectedLocation && isValidTacoBell && !isSearching && !configError ? '#36399a' : '#9ca3af',
                             }}
                             onMouseEnter={(e) => {
-                                if (selectedLocation && isValidTacoBell && !isSearching) {
+                                if (selectedLocation && isValidTacoBell && !isSearching && !configError) {
                                     e.currentTarget.style.backgroundColor = '#2d3180';
                                 }
                             }}
                             onMouseLeave={(e) => {
-                                if (selectedLocation && isValidTacoBell && !isSearching) {
+                                if (selectedLocation && isValidTacoBell && !isSearching && !configError) {
                                     e.currentTarget.style.backgroundColor = '#36399a';
                                 }
                             }}

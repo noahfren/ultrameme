@@ -247,12 +247,13 @@ async function runTest() {
             console.log(`📏 Total distance: ${result.totalDistance ? (result.totalDistance / 1609.34).toFixed(2) : 'N/A'} miles`);
             console.log(`   (${result.totalDistance ? Math.round(result.totalDistance) : 'N/A'} meters)`);
 
-            // Validate distance is within constraints
+            // Validate distance is within constraints (50km minimum, 55km maximum)
             const distanceMiles = result.totalDistance ? result.totalDistance / 1609.34 : 0;
-            if (distanceMiles >= 30 && distanceMiles <= 34) {
-                console.log(`\n✅ Distance is within target range (30-34 miles)!`);
+            const distanceKm = result.totalDistance ? result.totalDistance / 1000 : 0;
+            if (distanceKm >= 50 && distanceKm <= 55) {
+                console.log(`\n✅ Distance is within target range (50-55 km / 31-34 miles)!`);
             } else {
-                console.log(`\n⚠️  Distance is outside target range (30-34 miles)`);
+                console.log(`\n⚠️  Distance is outside target range (50-55 km / 31-34 miles)`);
             }
         } else {
             console.log('\n❌ Route finder failed:', result.error || 'Unknown error');

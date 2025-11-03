@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Location, TacoBellLocation } from '@/types';
 import { useRoutePlanner } from '@/hooks/useRoutePlanner';
 import MapView from '@/components/MapView';
 import LocationSearch from '@/components/LocationSearch';
 import WaypointList from '@/components/WaypointList';
-import DistanceDisplay from '@/components/DistanceDisplay';
 import ShareButton from '@/components/ShareButton';
+import { formatDistance } from '@/lib/googleMaps';
 import AutoRoutePlannerModal from '@/components/AutoRoutePlannerModal';
 import { APIProvider } from '@vis.gl/react-google-maps';
 
@@ -31,13 +31,40 @@ export default function Home() {
   const [endSameAsStart, setEndSameAsStart] = useState(false);
   const [waypointSearchValue, setWaypointSearchValue] = useState<Location | null>(null);
   const [isAutoModalOpen, setIsAutoModalOpen] = useState(false);
+  const manuallyUncheckedRef = useRef(false);
 
   // Sync endPoint with startPoint when checkbox is checked
   useEffect(() => {
     if (endSameAsStart && startPoint) {
       setEndPoint(startPoint);
+      manuallyUncheckedRef.current = false; // Reset when syncing
     }
   }, [endSameAsStart, startPoint, setEndPoint]);
+
+  // Auto-check the checkbox if start and end points are the same
+  useEffect(() => {
+    if (startPoint && endPoint) {
+      const areSame =
+        startPoint.lat === endPoint.lat &&
+        startPoint.lng === endPoint.lng &&
+        startPoint.address === endPoint.address;
+      // Auto-check if they're the same but checkbox is unchecked
+      // Don't auto-check if user manually unchecked it
+      if (areSame && !endSameAsStart && !manuallyUncheckedRef.current) {
+        setEndSameAsStart(true);
+      }
+      // Reset the manual uncheck flag if points change
+      if (!areSame) {
+        manuallyUncheckedRef.current = false;
+      }
+    } else if (!startPoint || !endPoint) {
+      // Uncheck if either point is cleared
+      if (endSameAsStart) {
+        setEndSameAsStart(false);
+      }
+      manuallyUncheckedRef.current = false;
+    }
+  }, [startPoint, endPoint, endSameAsStart]);
 
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
 
@@ -80,6 +107,20 @@ export default function Home() {
           {/* Left Column: Route Edit Tools */}
           <div className="lg:w-1/4 bg-gray-50 h-auto lg:h-[calc(100vh-120px)] border-r border-gray-200 flex flex-col">
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Total Distance Display */}
+              {routeData && (
+                <div className="bg-white rounded-lg shadow-md p-4 border border-gray-200 mb-4">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-1">Total Distance</h3>
+                  <p className="text-2xl font-semibold" style={{ color: '#36399a' }}>
+                    {isCalculating ? (
+                      <span className="text-gray-400">Calculating...</span>
+                    ) : (
+                      formatDistance(routeData.totalDistance)
+                    )}
+                  </p>
+                </div>
+              )}
+
               {/* Start Point */}
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-2">
@@ -98,7 +139,15 @@ export default function Home() {
                   type="checkbox"
                   id="endSameAsStart"
                   checked={endSameAsStart}
-                  onChange={(e) => setEndSameAsStart(e.target.checked)}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setEndSameAsStart(checked);
+                    if (!checked) {
+                      manuallyUncheckedRef.current = true;
+                    } else {
+                      manuallyUncheckedRef.current = false;
+                    }
+                  }}
                   className="w-4 h-4 border-gray-300 rounded focus:ring-2"
                   style={{ accentColor: '#36399a' }}
                 />
@@ -180,13 +229,19 @@ export default function Home() {
               )}
             </div>
 
-            {/* Clear Route Button - Pinned to Bottom */}
-            <div className="p-4 border-t border-gray-200 bg-gray-50">
+            {/* Share Button and Clear Route Button - Pinned to Bottom */}
+            <div className="p-4 border-t border-gray-200 bg-gray-50 space-y-3">
+              <ShareButton
+                startPoint={startPoint}
+                endPoint={endPoint}
+                waypoints={waypoints}
+              />
               {(startPoint || endPoint || waypoints.length > 0) && (
                 <button
                   onClick={() => {
                     clearRoute();
                     setEndSameAsStart(false);
+                    manuallyUncheckedRef.current = false;
                   }}
                   className="w-full px-4 py-2 text-white rounded-lg transition-colors font-medium text-sm"
                   style={{ backgroundColor: '#ef1897' }}
@@ -199,36 +254,13 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Center Column: Map */}
-          <div className="flex-1 lg:w-1/2 h-[600px] lg:h-[calc(100vh-120px)] bg-white">
+          {/* Map */}
+          <div className="flex-1 h-[600px] lg:h-[calc(100vh-120px)] bg-white">
             <MapView
               startPoint={startPoint}
               endPoint={endPoint}
               waypoints={waypoints}
             />
-          </div>
-
-          {/* Right Column: Route Summary */}
-          <div className="lg:w-1/4 bg-gray-50 h-auto lg:h-[calc(100vh-120px)] border-l border-gray-200 flex flex-col">
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {/* Distance Display */}
-              {routeData && (
-                <DistanceDisplay
-                  totalDistance={routeData.totalDistance}
-                  segments={routeData.segments}
-                  isLoading={isCalculating}
-                />
-              )}
-            </div>
-
-            {/* Share Button - Pinned to Bottom */}
-            <div className="p-4 border-t border-gray-200 bg-gray-50">
-              <ShareButton
-                startPoint={startPoint}
-                endPoint={endPoint}
-                waypoints={waypoints}
-              />
-            </div>
           </div>
         </main>
 
@@ -238,6 +270,8 @@ export default function Home() {
           onClose={() => setIsAutoModalOpen(false)}
           onRouteFound={(route: TacoBellLocation[]) => {
             loadAutoGeneratedRoute(route);
+            setEndSameAsStart(true);
+            manuallyUncheckedRef.current = false;
           }}
         />
       </div>

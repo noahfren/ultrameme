@@ -44,13 +44,35 @@ export default function DistanceDisplay({
                 className="flex items-center justify-between py-2 border-b border-gray-100 last:border-b-0"
               >
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-gray-600 truncate">
-                    <span className="font-medium">{segment.from}</span>
-                  </p>
+                  <div>
+                    {segment.fromName ? (
+                      <>
+                        <p className="text-sm font-medium text-gray-700">{segment.fromName}</p>
+                        {segment.from && segment.from.trim() ? (
+                          <p className="text-sm text-gray-600 truncate">{segment.from}</p>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="text-sm text-gray-600 truncate">
+                        <span className="font-medium">{segment.from || 'Unknown location'}</span>
+                      </p>
+                    )}
+                  </div>
                   <p className="text-xs text-gray-400 mt-0.5">↓</p>
-                  <p className="text-sm text-gray-600 truncate">
-                    <span className="font-medium">{segment.to}</span>
-                  </p>
+                  <div>
+                    {segment.toName ? (
+                      <>
+                        <p className="text-sm font-medium text-gray-700">{segment.toName}</p>
+                        {segment.to && segment.to.trim() ? (
+                          <p className="text-sm text-gray-600 truncate">{segment.to}</p>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="text-sm text-gray-600 truncate">
+                        <span className="font-medium">{segment.to || 'Unknown location'}</span>
+                      </p>
+                    )}
+                  </div>
                 </div>
                 <div className="ml-4 text-right">
                   <p className="text-sm font-semibold text-gray-800">

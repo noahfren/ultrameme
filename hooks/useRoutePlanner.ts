@@ -54,29 +54,41 @@ export function useRoutePlanner() {
                 totalDistance += distance;
 
                 let fromAddress: string;
+                let fromName: string | undefined;
                 let toAddress: string;
+                let toName: string | undefined;
 
                 if (sortedWaypoints.length === 0) {
                     // No waypoints: single leg from start to end
                     fromAddress = startPoint.address;
+                    fromName = startPoint.name;
                     toAddress = endPoint.address;
+                    toName = endPoint.name;
                 } else if (index === 0) {
                     // First leg: start to first waypoint
                     fromAddress = startPoint.address;
+                    fromName = startPoint.name;
                     toAddress = sortedWaypoints[0].location.address;
+                    toName = sortedWaypoints[0].location.name;
                 } else if (index < sortedWaypoints.length) {
                     // Middle legs: between waypoints
                     fromAddress = sortedWaypoints[index - 1].location.address;
+                    fromName = sortedWaypoints[index - 1].location.name;
                     toAddress = sortedWaypoints[index].location.address;
+                    toName = sortedWaypoints[index].location.name;
                 } else {
                     // Last leg: last waypoint to end
                     fromAddress = sortedWaypoints[sortedWaypoints.length - 1].location.address;
+                    fromName = sortedWaypoints[sortedWaypoints.length - 1].location.name;
                     toAddress = endPoint.address;
+                    toName = endPoint.name;
                 }
 
                 segments.push({
                     from: fromAddress,
+                    fromName: fromName,
                     to: toAddress,
+                    toName: toName,
                     distance,
                 });
             });
@@ -136,6 +148,7 @@ export function useRoutePlanner() {
             lat: tacoBells[0].lat,
             lng: tacoBells[0].lng,
             address: tacoBells[0].address,
+            name: tacoBells[0].name,
         };
         setStartPoint(start);
         setEndPoint(start);
@@ -147,6 +160,7 @@ export function useRoutePlanner() {
                 lat: tb.lat,
                 lng: tb.lng,
                 address: tb.address,
+                name: tb.name,
             },
             order: index,
         }));

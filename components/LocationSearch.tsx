@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { Location } from '@/types';
+import { extractAddressFromPlace } from '@/lib/googleMaps';
 
 interface LocationSearchProps {
     placeholder?: string;
@@ -31,22 +32,27 @@ export default function LocationSearch({
 
             autocompleteRef.current = new window.google.maps.places.Autocomplete(inputRef.current, {
                 // No types restriction - searches all place types including addresses and businesses
-                fields: ['geometry', 'formatted_address', 'name'],
+                fields: ['geometry', 'formatted_address', 'name', 'address_components', 'vicinity'],
             });
 
             autocompleteRef.current.addListener('place_changed', () => {
                 const place = autocompleteRef.current?.getPlace();
                 if (place && place.geometry && place.geometry.location) {
-                    // Use business name if available, otherwise use formatted address
-                    const displayName = place.name || place.formatted_address || '';
+                    const name = place.name || undefined;
+                    // Extract clean address using the helper function
+                    const address = extractAddressFromPlace(place) || place.formatted_address || '';
+
+                    // Use name as display value if available, otherwise address
+                    const displayValue = name || address;
 
                     const location: Location = {
                         lat: place.geometry.location.lat(),
                         lng: place.geometry.location.lng(),
-                        address: displayName,
+                        address: address.trim() || (name || ''), // Fallback to name if no address
+                        name: name,
                     };
                     onLocationSelect(location);
-                    setInputValue(displayName);
+                    setInputValue(displayValue);
                     setShowSuggestions(false);
                 }
             });
@@ -63,7 +69,7 @@ export default function LocationSearch({
     // Update input value when external value changes
     useEffect(() => {
         if (value) {
-            setInputValue(value.address);
+            setInputValue(value.name || value.address);
         } else {
             setInputValue('');
         }

@@ -1,162 +1,267 @@
 import { TacoBellLocation, RouteSearchProgress, RouteFinderConfig, RouteFinderResult } from '@/types';
 import { Location } from '@/types';
-import { searchNearbyPlaces, calculateRoute, haversineDistance } from './googleMaps';
+import { searchNearbyPlaces, calculateRoute, haversineDistance, extractAddressFromPlace, getPlaceDetails } from './googleMaps';
 
 const DEFAULT_CONFIG: RouteFinderConfig = {
-    minDistanceMeters: 48280, // 30 miles
-    maxDistanceMeters: 54717, // 34 miles
+    minDistanceMeters: 50000, // 50km hard minimum
+    maxDistanceMeters: 55000, // ~34 miles (account for road distance being ~15-20% longer than Haversine)
     minTacoBells: 8,
     maxTacoBells: 10,
     searchRadiusMiles: 15,
 };
 
 interface RouteCandidate {
-    path: TacoBellLocation[];
-    estimatedDistance: number;
-    visited: Set<string>; // place IDs
+    stops: TacoBellLocation[];
+    totalDistance: number; // in meters (Haversine)
+    score: number;
 }
 
 /**
- * Calculate bearing from one location to another (0-360°)
+ * Calculate total Haversine distance for a route (including return to start)
  */
-function calculateBearing(from: Location, to: Location): number {
-    const lat1 = from.lat * Math.PI / 180;
-    const lat2 = to.lat * Math.PI / 180;
-    const dLng = (to.lng - from.lng) * Math.PI / 180;
-
-    const y = Math.sin(dLng) * Math.cos(lat2);
-    const x = Math.cos(lat1) * Math.sin(lat2) -
-        Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
-
-    let bearing = Math.atan2(y, x) * 180 / Math.PI;
-    return (bearing + 360) % 360; // Normalize to 0-360°
-}
-
-/**
- * Calculate angular spread score (variance-based method)
- * Returns 0-1 score where 1 is perfectly distributed
- */
-function calculateAngularSpread(route: Location[], start: Location): number {
+function routeDistance(route: TacoBellLocation[]): number {
     if (route.length < 2) return 0;
 
-    const bearings = route.map(tb => calculateBearing(start, tb)).sort((a, b) => a - b);
-
-    // Calculate gaps between consecutive bearings
-    const gaps: number[] = [];
-    for (let i = 0; i < bearings.length; i++) {
-        const next = bearings[(i + 1) % bearings.length];
-        const current = bearings[i];
-        const gap = i === bearings.length - 1
-            ? (360 - current + next) // wrap around
-            : (next - current);
-        gaps.push(gap);
+    let total = 0;
+    for (let i = 0; i < route.length - 1; i++) {
+        total += haversineDistance(
+            route[i].lat,
+            route[i].lng,
+            route[i + 1].lat,
+            route[i + 1].lng
+        );
     }
-
-    // Ideal gap = 360° / numTacoBells
-    const idealGap = 360 / bearings.length;
-
-    // Calculate variance from ideal
-    const variance = gaps.reduce((sum, gap) =>
-        sum + Math.pow(gap - idealGap, 2), 0) / gaps.length;
-
-    // Lower variance = better spread (convert to 0-1 score)
-    const maxVariance = Math.pow(idealGap, 2);
-    return 1 - Math.min(variance / maxVariance, 1);
+    return total;
 }
 
 /**
- * Calculate circularity score (penalize backtracking, reward smooth loops)
- * Returns 0-1 score where 1 is a perfect loop
+ * Calculate loop closure penalty (distance between start and end)
+ * Returns distance in meters
  */
-function calculateCircularity(route: Location[], start: Location): number {
-    if (route.length < 3) return 0.5; // Not enough points to determine
-
-    // Calculate cumulative bearing change
-    let totalBearingChange = 0;
-    let prevBearing: number | null = null;
-
-    for (let i = 0; i < route.length; i++) {
-        const current = route[i];
-        const next = route[(i + 1) % route.length];
-        const bearing = calculateBearing(current, next);
-
-        if (prevBearing !== null) {
-            // Calculate smallest angle change
-            let change = bearing - prevBearing;
-            if (change > 180) change -= 360;
-            if (change < -180) change += 360;
-            totalBearingChange += Math.abs(change);
-        }
-
-        prevBearing = bearing;
-    }
-
-    // For a perfect loop, total bearing change should be close to 360°
-    const idealChange = 360;
-    const deviation = Math.abs(totalBearingChange - idealChange);
-    return 1 - Math.min(deviation / idealChange, 1);
+function loopnessPenalty(route: TacoBellLocation[]): number {
+    if (route.length < 2) return Infinity;
+    const start = route[0];
+    const end = route[route.length - 1];
+    return haversineDistance(start.lat, start.lng, end.lat, end.lng);
 }
 
 /**
- * Score distance fitness (how close to target 31-35 miles)
- * Returns 0-1 score
+ * Calculate segment spacing variance to measure how evenly distributed segments are
+ * Returns coefficient of variation (CV) which is normalized standard deviation
+ * Lower CV means more evenly spaced segments
  */
-function scoreDistanceFitness(distanceMeters: number, minMeters: number, maxMeters: number): number {
-    const targetMin = minMeters;
-    const targetMax = maxMeters;
-    const targetCenter = (targetMin + targetMax) / 2;
+function calculateSegmentSpacingVariance(route: TacoBellLocation[]): number {
+    if (route.length < 2) return Infinity;
 
-    if (distanceMeters < targetMin) {
-        // Too short - penalize more the further it is
-        return Math.max(0, 1 - (targetMin - distanceMeters) / targetMin);
-    } else if (distanceMeters > targetMax) {
-        // Too long - penalize
-        return Math.max(0, 1 - (distanceMeters - targetMax) / targetMax);
-    } else {
-        // In range - prefer center
-        const distanceFromCenter = Math.abs(distanceMeters - targetCenter);
-        const maxDistance = (targetMax - targetMin) / 2;
-        return 1 - (distanceFromCenter / maxDistance);
+    const segmentDistances: number[] = [];
+
+    // Calculate distance for each segment
+    for (let i = 0; i < route.length - 1; i++) {
+        const distance = haversineDistance(
+            route[i].lat,
+            route[i].lng,
+            route[i + 1].lat,
+            route[i + 1].lng
+        );
+        segmentDistances.push(distance);
     }
+
+    if (segmentDistances.length === 0) return Infinity;
+
+    // Calculate mean
+    const mean = segmentDistances.reduce((sum, d) => sum + d, 0) / segmentDistances.length;
+
+    // Calculate variance
+    const variance = segmentDistances.reduce((sum, d) => sum + Math.pow(d - mean, 2), 0) / segmentDistances.length;
+
+    // Calculate standard deviation
+    const stdDev = Math.sqrt(variance);
+
+    // Return coefficient of variation (CV) - normalized measure of variability
+    // CV = stdDev / mean (multiply by 1000 to convert to km scale for scoring)
+    return mean > 0 ? (stdDev / mean) * 1000 : Infinity;
 }
 
 /**
- * Combined route scoring function
+ * Score a route based on:
+ * 1. Distance closeness to target (accounting for road distance multiplier)
+ * 2. Loop closure penalty (how close start and end are)
+ * 3. Segment spacing variance (how evenly distributed segments are)
+ * 
+ * Note: Actual road distance is typically 15-20% longer than Haversine distance,
+ * so we target a lower Haversine distance to account for this.
  */
 function scoreRoute(
-    route: Location[],
-    start: Location,
-    estimatedDistance: number,
-    minDistance: number,
-    maxDistance: number
-): number {
-    const distanceScore = scoreDistanceFitness(estimatedDistance, minDistance, maxDistance);
-    const spreadScore = calculateAngularSpread(route, start);
-    const circularityScore = calculateCircularity(route, start);
+    route: TacoBellLocation[],
+    targetRoadKm: number = 50,
+    loopPenaltyWeight: number = 0.5,
+    spacingVarianceWeight: number = 0.3,
+    roadDistanceMultiplier: number = 1.18 // Haversine to road distance ratio
+): { totalDistance: number; score: number } {
+    const haversineDist = routeDistance(route);
+    const haversineKm = haversineDist / 1000;
 
-    return (
-        distanceScore * 0.5 +
-        spreadScore * 0.3 +
-        circularityScore * 0.2
-    );
+    // Estimate actual road distance from Haversine
+    const estimatedRoadKm = haversineKm * roadDistanceMultiplier;
+
+    // Distance penalty: how far from target road distance
+    const distanceDiff = Math.abs(estimatedRoadKm - targetRoadKm);
+
+    // Loop closure penalty (in km)
+    const loopPenalty = loopnessPenalty(route) / 1000;
+
+    // Segment spacing variance penalty (measures unevenness)
+    const spacingVariance = calculateSegmentSpacingVariance(route);
+
+    // Combined score (lower is better)
+    const score = distanceDiff + loopPenaltyWeight * loopPenalty + spacingVarianceWeight * spacingVariance;
+
+    return { totalDistance: haversineDist, score };
 }
 
 /**
- * Estimate route distance using haversine + walking multiplier
+ * Generate candidate routes using greedy nearest-neighbor with randomization
+ * Uses diversity to avoid getting stuck in local optima
  */
-function estimateRouteDistance(route: TacoBellLocation[]): number {
-    if (route.length < 2) return 0;
+function generateCandidateRoutes(
+    start: TacoBellLocation,
+    allTacoBells: TacoBellLocation[],
+    targetKm: number = 50,
+    nStops: number = 9,
+    iterations: number = 200
+): RouteCandidate[] {
+    // Filter Taco Bells within 15 miles (~24.14 km)
+    const nearby = allTacoBells.filter(
+        (tb) => {
+            const distance = haversineDistance(start.lat, start.lng, tb.lat, tb.lng);
+            return distance <= 24140 && tb.placeId !== start.placeId;
+        }
+    );
 
-    let totalDistance = 0;
-
-    for (let i = 0; i < route.length; i++) {
-        const current = route[i];
-        const next = route[(i + 1) % route.length];
-        totalDistance += haversineDistance(current.lat, current.lng, next.lat, next.lng);
+    if (nearby.length < nStops - 1) {
+        throw new Error(`Not enough Taco Bells nearby! Found ${nearby.length}, need at least ${nStops - 1}`);
     }
 
-    // Apply walking multiplier (≈1.3x) to approximate actual walking distance
-    return totalDistance * 1.3;
+    const routes: RouteCandidate[] = [];
+    const seenRoutes = new Set<string>(); // Track route signatures to avoid duplicates
+
+    // Generate multiple candidate routes with randomization
+    for (let iter = 0; iter < iterations; iter++) {
+        // Shuffle nearby Taco Bells for randomization
+        const shuffled = [...nearby].sort(() => Math.random() - 0.5);
+        const route: TacoBellLocation[] = [start];
+
+        // Greedy nearest-neighbor with segment balance consideration
+        // Prefers candidates that keep segments evenly spaced
+        while (route.length < nStops) {
+            const last = route[route.length - 1];
+
+            // Estimate target average segment distance
+            // Target ~50km total road distance, with ~1.18 multiplier for Haversine to road
+            // So target Haversine distance is ~50/1.18 ≈ 42.4km
+            // But be more conservative to avoid routes that are too long
+            const targetTotalHaversineKm = targetKm / 1.18 * 0.9; // Use 90% to be conservative
+            const targetAvgSegmentKm = targetTotalHaversineKm / nStops;
+            const targetAvgSegmentM = targetAvgSegmentKm * 1000;
+
+            // Calculate current average segment distance
+            let currentAvgSegmentM = targetAvgSegmentM; // Default to target if no segments yet
+            if (route.length > 1) {
+                const totalSoFar = routeDistance(route);
+                currentAvgSegmentM = totalSoFar / (route.length - 1);
+            }
+
+            // Find all candidate distances with balance scores
+            const candidates: { tb: TacoBellLocation; distance: number; balanceScore: number }[] = [];
+
+            for (const candidate of shuffled) {
+                // Skip if already in route
+                if (route.some(tb => tb.placeId === candidate.placeId)) {
+                    continue;
+                }
+
+                const distance = haversineDistance(
+                    last.lat,
+                    last.lng,
+                    candidate.lat,
+                    candidate.lng
+                );
+
+                // Balance score: how close this distance is to target average
+                // Lower score is better (closer to target)
+                const balanceScore = Math.abs(distance - targetAvgSegmentM);
+
+                candidates.push({ tb: candidate, distance, balanceScore });
+            }
+
+            if (candidates.length === 0) break; // No more candidates
+
+            // Sort by distance (for nearest-neighbor fallback)
+            candidates.sort((a, b) => a.distance - b.distance);
+
+            // Calculate combined score: prioritize distance, then balance
+            // Weight: 70% pure distance (for efficiency), 30% balance (even spacing)
+            candidates.forEach(c => {
+                const normalizedBalance = c.balanceScore / targetAvgSegmentM; // Normalize
+                const normalizedDistance = c.distance / targetAvgSegmentM; // Normalize
+                c.balanceScore = 0.7 * normalizedDistance + 0.3 * normalizedBalance;
+            });
+
+            // Sort by combined score
+            candidates.sort((a, b) => a.balanceScore - b.balanceScore);
+
+            // 70% of the time pick best balance, 30% pick from top 3 for diversity
+            let selected: { tb: TacoBellLocation; distance: number; balanceScore: number };
+            if (Math.random() < 0.7 || candidates.length === 1) {
+                selected = candidates[0];
+            } else {
+                const topK = Math.min(3, candidates.length);
+                const randomIndex = Math.floor(Math.random() * topK);
+                selected = candidates[randomIndex];
+            }
+
+            route.push(selected.tb);
+        }
+
+        // Close the loop by returning to start
+        if (route.length > 1 && route[route.length - 1].placeId !== start.placeId) {
+            route.push(start);
+        }
+
+        // Create a signature for this route to avoid exact duplicates
+        const routeSignature = route.slice(1, -1)
+            .map(tb => tb.placeId)
+            .sort()
+            .join(',');
+
+        if (seenRoutes.has(routeSignature)) {
+            continue; // Skip duplicate routes
+        }
+        seenRoutes.add(routeSignature);
+
+        // Filter out routes that are already too long before scoring
+        // Account for road distance multiplier (~1.18x)
+        const haversineDist = routeDistance(route);
+        const estimatedRoadKm = (haversineDist / 1000) * 1.18;
+
+        // Skip routes that are already too long
+        if (estimatedRoadKm > targetKm * 1.1) { // Allow 10% tolerance
+            continue;
+        }
+
+        // Score the route
+        // Reduce spacing variance weight to prioritize distance
+        const { totalDistance, score } = scoreRoute(route, targetKm, 0.5, 0.2);
+
+        routes.push({
+            stops: route,
+            totalDistance,
+            score,
+        });
+    }
+
+    // Sort by score (lower is better) and return top candidates
+    return routes.sort((a, b) => a.score - b.score);
 }
 
 /**
@@ -198,13 +303,51 @@ async function findTacoBells(
             );
 
         if (isTacoBell && place.geometry?.location) {
-            tacoBells.push({
-                lat: place.geometry.location.lat,
-                lng: place.geometry.location.lng,
-                address: place.formatted_address || place.name,
-                placeId: place.place_id,
-                name: place.name,
-            });
+            try {
+                // Fetch full place details to get proper address information
+                const placeDetails = await getPlaceDetails(place.place_id);
+
+                // Extract clean address (without business name duplication)
+                // Only use street address from address_components
+                const address = extractAddressFromPlace({
+                    name: placeDetails.name,
+                    formatted_address: placeDetails.formatted_address,
+                    vicinity: placeDetails.vicinity,
+                    address_components: placeDetails.address_components,
+                });
+
+                // Ensure we never use the name as address - if address extraction fails, use empty string
+                const finalAddress = (address && address.trim() && address !== placeDetails.name)
+                    ? address.trim()
+                    : '';
+
+                console.log('[RouteFinder] Taco Bell address extraction:', {
+                    name: placeDetails.name,
+                    extractedAddress: address,
+                    finalAddress: finalAddress,
+                    hasAddressComponents: !!placeDetails.address_components,
+                    addressComponentsCount: placeDetails.address_components?.length || 0,
+                });
+
+                tacoBells.push({
+                    lat: placeDetails.geometry.location.lat,
+                    lng: placeDetails.geometry.location.lng,
+                    address: finalAddress, // Only street address, never the business name
+                    placeId: placeDetails.place_id,
+                    name: placeDetails.name,
+                });
+            } catch (error) {
+                console.warn(`[RouteFinder] Failed to get details for ${place.name} (${place.place_id}):`, error);
+                // If we can't get place details, we can't extract address from components
+                // Nearby search results don't have address_components, so just leave address empty
+                tacoBells.push({
+                    lat: place.geometry.location.lat,
+                    lng: place.geometry.location.lng,
+                    address: '', // Leave empty - we need place details to get address_components
+                    placeId: place.place_id,
+                    name: place.name,
+                });
+            }
         } else {
             console.log('[RouteFinder] Skipped place (not Taco Bell):', place.name);
         }
@@ -224,18 +367,21 @@ async function findTacoBells(
 }
 
 /**
- * Main route finding algorithm using beam search
+ * Main route finding algorithm using new greedy nearest-neighbor approach
  */
 export async function findOptimalRoute(
     startTacoBell: TacoBellLocation,
     config: RouteFinderConfig = DEFAULT_CONFIG,
     onProgress?: (progress: RouteSearchProgress) => void
 ): Promise<RouteFinderResult> {
+    const targetKm = 50; // Target 50km as per recommendation
+
     console.log('[RouteFinder] Starting route search:', {
         startLocation: `${startTacoBell.name} (${startTacoBell.lat.toFixed(6)}, ${startTacoBell.lng.toFixed(6)})`,
         config: {
-            minDistanceMiles: (config.minDistanceMeters / 1609.34).toFixed(1),
-            maxDistanceMiles: (config.maxDistanceMeters / 1609.34).toFixed(1),
+            minDistanceKm: (config.minDistanceMeters / 1000).toFixed(1),
+            maxDistanceKm: (config.maxDistanceMeters / 1000).toFixed(1),
+            targetKm,
             minTacoBells: config.minTacoBells,
             maxTacoBells: config.maxTacoBells,
             searchRadiusMiles: config.searchRadiusMiles,
@@ -260,15 +406,57 @@ export async function findOptimalRoute(
             throw new Error(error);
         }
 
-        // Remove starting Taco Bell from candidates (we'll add it back at the end)
-        const candidateTacoBells = allTacoBells.filter(
-            tb => tb.placeId !== startTacoBell.placeId
-        );
+        // Make sure start Taco Bell is in the list
+        const startInList = allTacoBells.find(tb => tb.placeId === startTacoBell.placeId);
+        if (!startInList) {
+            allTacoBells.push(startTacoBell);
+        }
 
-        console.log('[RouteFinder] Starting beam search:', {
-            totalTacoBells: allTacoBells.length,
-            candidateTacoBells: candidateTacoBells.length,
-            beamWidth: 5,
+        if (onProgress) {
+            onProgress({
+                status: 'finding_route',
+                tacoBellsFound: allTacoBells.length,
+                apiCallsUsed: apiCallCount,
+                message: 'Generating candidate routes...',
+            });
+        }
+
+        // Step 2: Generate candidate routes using new algorithm
+        console.log('[RouteFinder] Generating candidate routes...');
+
+        const candidateRoutes: RouteCandidate[] = [];
+
+        // Try different route lengths (8-10 Taco Bells)
+        for (let nStops = config.minTacoBells; nStops <= config.maxTacoBells; nStops++) {
+            try {
+                const routes = generateCandidateRoutes(
+                    startTacoBell,
+                    allTacoBells,
+                    targetKm,
+                    nStops,
+                    200 // Generate 200 candidates per route length
+                );
+                candidateRoutes.push(...routes);
+            } catch (error) {
+                console.warn(`[RouteFinder] Could not generate routes with ${nStops} stops:`, error);
+            }
+        }
+
+        console.log(`[RouteFinder] Generated ${candidateRoutes.length} candidate routes`);
+
+        // Get top 5 candidates
+        const topCandidates = candidateRoutes.slice(0, 5);
+
+        if (topCandidates.length === 0) {
+            throw new Error('No candidate routes generated');
+        }
+
+        console.log('[RouteFinder] Top candidate routes (Haversine estimates):');
+        topCandidates.forEach((route, i) => {
+            const distanceKm = route.totalDistance / 1000;
+            const estimatedRoadKm = distanceKm * 1.18; // Account for road distance multiplier
+            const loopPenalty = loopnessPenalty(route.stops) / 1000;
+            console.log(`  ${i + 1}. ${route.stops.length - 1} stops, ${distanceKm.toFixed(1)} km Haversine (~${estimatedRoadKm.toFixed(1)} km road), score: ${route.score.toFixed(2)}, loop penalty: ${loopPenalty.toFixed(2)} km`);
         });
 
         if (onProgress) {
@@ -276,255 +464,20 @@ export async function findOptimalRoute(
                 status: 'finding_route',
                 tacoBellsFound: allTacoBells.length,
                 apiCallsUsed: apiCallCount,
-                message: 'Evaluating routes...',
+                routesEvaluated: candidateRoutes.length,
+                message: `Generated ${candidateRoutes.length} candidate routes, verifying top ${topCandidates.length}...`,
             });
         }
 
-        // Step 2: Initialize beam search
-        const BEAM_WIDTH = 5;
-        let currentRoutes: RouteCandidate[] = [{
-            path: [startTacoBell],
-            estimatedDistance: 0,
-            visited: new Set([startTacoBell.placeId]),
-        }];
+        // Step 3: Verify top candidates with Google Directions API
+        console.log(`[RouteFinder] Verifying top ${topCandidates.length} routes with Directions API`);
 
         let bestRoute: RouteCandidate | null = null;
-        let bestScore = -1;
-        let routesEvaluated = 0;
-
-        // Step 3: Beam search with depth limit
-        for (let depth = 0; depth < config.maxTacoBells; depth++) {
-            console.log(`[RouteFinder] Beam search iteration ${depth + 1}/${config.maxTacoBells}, current routes: ${currentRoutes.length}`);
-
-            const candidates: RouteCandidate[] = [];
-
-            for (const route of currentRoutes) {
-                const lastLocation = route.path[route.path.length - 1];
-
-                // Get unvisited candidates and sort by distance from last location
-                const unvisitedCandidates = candidateTacoBells
-                    .filter(tb => !route.visited.has(tb.placeId))
-                    .map(tb => ({
-                        tacoBell: tb,
-                        distance: haversineDistance(
-                            lastLocation.lat,
-                            lastLocation.lng,
-                            tb.lat,
-                            tb.lng
-                        )
-                    }))
-                    .sort((a, b) => a.distance - b.distance); // Sort by distance, closest first
-
-                // Limit to closest candidates (prioritize nearby Taco Bells)
-                // Consider top 15 closest candidates to keep routes compact
-                const MAX_CANDIDATES_PER_ROUTE = 15;
-                const closestCandidates = unvisitedCandidates.slice(0, MAX_CANDIDATES_PER_ROUTE);
-
-                // Try adding each closest Taco Bell
-                for (const { tacoBell: candidate, distance: distanceToCandidate } of closestCandidates) {
-
-                    // Create new path to estimate full route distance
-                    const newPath = [...route.path, candidate];
-                    const estimatedTotal = estimateRouteDistance([...newPath, startTacoBell]);
-                    const newPathLength = newPath.length;
-
-                    // Be more lenient with routes that haven't reached minimum size yet
-                    // They need room to grow, and estimates may be inaccurate for partial routes
-                    const isStillBuilding = newPathLength < config.minTacoBells;
-                    const maxDistanceThreshold = isStillBuilding
-                        ? config.maxDistanceMeters * 1.5  // More lenient for building routes
-                        : config.maxDistanceMeters * 1.2; // Stricter once we have enough
-
-                    // For routes that are close to the target, allow them even if slightly over
-                    // The actual Directions API distance might be different from estimates
-                    const distancePerTacoBell = estimatedTotal / newPathLength;
-                    const targetDistancePerTacoBell = (config.minDistanceMeters + config.maxDistanceMeters) / 2 / config.minTacoBells;
-
-                    // If we're still building and distance per Taco Bell is reasonable, be more lenient
-                    if (isStillBuilding && distancePerTacoBell <= targetDistancePerTacoBell * 1.5) {
-                        // Route is growing at a reasonable rate, allow it even if slightly over threshold
-                        if (estimatedTotal > maxDistanceThreshold * 1.1) {
-                            continue; // Still too long even with leniency
-                        }
-                    } else if (estimatedTotal > maxDistanceThreshold) {
-                        continue; // Too long
-                    }
-
-                    // Only prune too-short routes if we've reached minimum size AND we're way too short
-                    // This allows routes to grow to reach the target
-                    if (newPathLength >= config.minTacoBells && estimatedTotal < config.minDistanceMeters * 0.7) {
-                        continue; // We have enough Taco Bells but route is way too short
-                    }
-
-                    // Create new candidate route
-                    // Note: estimatedDistance is just cumulative, not including return trip
-                    // The full distance (including return) is calculated via estimateRouteDistance
-                    const newDistance = route.estimatedDistance + distanceToCandidate;
-
-                    candidates.push({
-                        path: newPath,
-                        estimatedDistance: newDistance,
-                        visited: new Set([...route.visited, candidate.placeId]),
-                    });
-                }
-            }
-
-            console.log(`[RouteFinder] Generated ${candidates.length} candidate routes at depth ${depth + 1}`);
-
-            if (candidates.length === 0) {
-                console.log(`[RouteFinder] No candidates generated at depth ${depth + 1}. Current routes: ${currentRoutes.length}`);
-                for (const route of currentRoutes) {
-                    const unvisitedCount = candidateTacoBells.filter(tb => !route.visited.has(tb.placeId)).length;
-                    const currentEst = estimateRouteDistance([...route.path, startTacoBell]);
-                    console.log(`  Route with ${route.path.length} Taco Bells: ${unvisitedCount} unvisited remaining, current distance: ${(currentEst / 1609.34).toFixed(2)} miles`);
-
-                    // Try one sample candidate to see why it's being pruned
-                    if (unvisitedCount > 0) {
-                        const sampleCandidate = candidateTacoBells.find(tb => !route.visited.has(tb.placeId));
-                        if (sampleCandidate) {
-                            const sampleEst = estimateRouteDistance([...route.path, sampleCandidate, startTacoBell]);
-                            const wouldBeBuilding = (route.path.length + 1) < config.minTacoBells;
-                            const threshold = wouldBeBuilding
-                                ? config.maxDistanceMeters * 1.5
-                                : config.maxDistanceMeters * 1.2;
-                            console.log(`    Sample candidate would make route: ${(sampleEst / 1609.34).toFixed(2)} miles (threshold: ${(threshold / 1609.34).toFixed(2)})`);
-                        }
-                    }
-                }
-                // Break early if no candidates and we haven't found any valid routes
-                if (!bestRoute && depth < config.minTacoBells) {
-                    console.warn(`[RouteFinder] Beam search exhausted at depth ${depth + 1}, but haven't reached minimum Taco Bells (${config.minTacoBells})`);
-                }
-            }
-
-            // Score and sort candidates
-            const scoredCandidates = candidates.map(candidate => {
-                const estimatedTotal = estimateRouteDistance([...candidate.path, startTacoBell]);
-                let score = scoreRoute(
-                    candidate.path,
-                    startTacoBell,
-                    estimatedTotal,
-                    config.minDistanceMeters,
-                    config.maxDistanceMeters
-                );
-
-                // Bonus for routes with good distance-per-Taco-Bell ratio (can grow to minTacoBells)
-                const pathLength = candidate.path.length;
-                if (pathLength < config.minTacoBells) {
-                    const distancePerTacoBell = estimatedTotal / pathLength;
-                    const targetDistancePerTacoBell = (config.minDistanceMeters + config.maxDistanceMeters) / 2 / config.minTacoBells;
-
-                    // Reward routes that have a reasonable distance-per-Taco-Bell ratio
-                    // This indicates they can grow to 8-10 Taco Bells without exceeding limits
-                    const ratioFitness = 1 - Math.min(Math.abs(distancePerTacoBell - targetDistancePerTacoBell) / targetDistancePerTacoBell, 1);
-                    score += ratioFitness * 0.2; // Bonus up to 0.2 points
-                }
-
-                return { candidate, score, estimatedTotal };
-            });
-
-            scoredCandidates.sort((a, b) => b.score - a.score);
-
-            // Log top candidates
-            if (scoredCandidates.length > 0) {
-                console.log(`[RouteFinder] Top ${Math.min(3, scoredCandidates.length)} candidate scores:`,
-                    scoredCandidates.slice(0, 3).map((sc, i) => ({
-                        rank: i + 1,
-                        pathLength: sc.candidate.path.length,
-                        estimatedDistanceMiles: (sc.estimatedTotal / 1609.34).toFixed(2),
-                        score: sc.score.toFixed(3),
-                    }))
-                );
-            }
-
-            // Keep top BEAM_WIDTH candidates
-            currentRoutes = scoredCandidates.slice(0, BEAM_WIDTH).map(sc => sc.candidate);
-
-            // Check if any route is complete or promising (within size and distance constraints)
-            for (const route of currentRoutes) {
-                const completeRoute = [...route.path, startTacoBell];
-                const estimatedTotal = estimateRouteDistance(completeRoute);
-
-                // Check if route is in the target distance range (even if not enough Taco Bells yet)
-                const isInRange = estimatedTotal >= config.minDistanceMeters * 0.9 &&
-                    estimatedTotal <= config.maxDistanceMeters * 1.1;
-                const hasMinTacoBells = route.path.length >= config.minTacoBells;
-                const hasMaxTacoBells = route.path.length <= config.maxTacoBells;
-
-                if (hasMinTacoBells && hasMaxTacoBells && isInRange) {
-                    const score = scoreRoute(
-                        route.path,
-                        startTacoBell,
-                        estimatedTotal,
-                        config.minDistanceMeters,
-                        config.maxDistanceMeters
-                    );
-
-                    console.log(`[RouteFinder] Found valid route candidate:`, {
-                        pathLength: route.path.length,
-                        estimatedDistanceMiles: (estimatedTotal / 1609.34).toFixed(2),
-                        score: score.toFixed(3),
-                    });
-
-                    if (score > bestScore) {
-                        console.log(`[RouteFinder] New best route! Score: ${score.toFixed(3)} (previous: ${bestScore.toFixed(3)})`);
-                        bestRoute = {
-                            path: completeRoute,
-                            estimatedDistance: estimatedTotal,
-                            visited: route.visited,
-                        };
-                        bestScore = score;
-                    }
-                    routesEvaluated++;
-                }
-            }
-
-            // Update progress
-            if (onProgress) {
-                onProgress({
-                    status: 'finding_route',
-                    tacoBellsFound: allTacoBells.length,
-                    apiCallsUsed: apiCallCount,
-                    routesEvaluated: routesEvaluated,
-                    message: `Evaluating routes... (${routesEvaluated} routes evaluated)`,
-                });
-            }
-
-            // If no candidates left, break
-            if (currentRoutes.length === 0) break;
-        }
-
-        // Step 4: For promising routes, calculate actual distances using Google Directions API
-        const routesToVerify: RouteCandidate[] = [];
-
-        if (bestRoute) {
-            routesToVerify.push(bestRoute);
-            console.log('[RouteFinder] Added best route to verification queue');
-        }
-
-        // Also verify top current routes
-        for (const route of currentRoutes.slice(0, 3)) {
-            if (route.path.length >= config.minTacoBells) {
-                const completeRoute = [...route.path, startTacoBell];
-                const estimatedTotal = estimateRouteDistance(completeRoute);
-
-                if (estimatedTotal >= config.minDistanceMeters * 0.9 && estimatedTotal <= config.maxDistanceMeters * 1.1) {
-                    routesToVerify.push({
-                        path: completeRoute,
-                        estimatedDistance: estimatedTotal,
-                        visited: route.visited,
-                    });
-                }
-            }
-        }
-
-        console.log(`[RouteFinder] Verifying ${routesToVerify.length} routes with Directions API (max ${maxApiCalls} calls)`);
-
-        let bestActualRoute: RouteCandidate | null = null;
         let bestActualDistance = Infinity;
+        let bestRouteIndex = -1;
 
-        for (let i = 0; i < routesToVerify.length; i++) {
-            const route = routesToVerify[i];
+        for (let i = 0; i < topCandidates.length; i++) {
+            const candidate = topCandidates[i];
 
             if (apiCallCount >= maxApiCalls) {
                 console.warn(`[RouteFinder] Reached max API calls (${maxApiCalls}), stopping verification`);
@@ -532,12 +485,16 @@ export async function findOptimalRoute(
             }
 
             try {
-                const waypoints = route.path.slice(1, -1); // Exclude start (first) and end (duplicate start)
-                console.log(`[RouteFinder] API call ${apiCallCount + 1}/${maxApiCalls}: Verifying route ${i + 1}/${routesToVerify.length} with ${route.path.length - 1} Taco Bells`);
+                // Remove duplicate start at end for waypoints
+                const waypoints = candidate.stops.slice(1, -1);
+                const origin = candidate.stops[0];
+                const destination = candidate.stops[candidate.stops.length - 1];
+
+                console.log(`[RouteFinder] API call ${apiCallCount + 1}/${maxApiCalls}: Verifying route ${i + 1}/${topCandidates.length} with ${waypoints.length} waypoints`);
 
                 const directions = await calculateRoute(
-                    route.path[0],
-                    route.path[route.path.length - 1],
+                    origin,
+                    destination,
                     waypoints
                 );
 
@@ -549,18 +506,37 @@ export async function findOptimalRoute(
                         0
                     );
 
-                    console.log(`[RouteFinder] Route ${i + 1} actual distance: ${(totalDistance / 1609.34).toFixed(2)} miles (estimated: ${(route.estimatedDistance / 1609.34).toFixed(2)})`);
+                    const distanceKm = totalDistance / 1000;
+                    const distanceMiles = totalDistance / 1609.34;
 
+                    console.log(`[RouteFinder] Route ${i + 1} actual distance: ${distanceKm.toFixed(1)} km (${distanceMiles.toFixed(2)} miles)`);
+                    console.log(`  Haversine estimate was: ${(candidate.totalDistance / 1000).toFixed(1)} km`);
+
+                    // Check if route meets constraints
                     if (totalDistance >= config.minDistanceMeters &&
-                        totalDistance <= config.maxDistanceMeters &&
-                        totalDistance < bestActualDistance) {
-                        console.log(`[RouteFinder] Route ${i + 1} is valid and new best! Distance: ${(totalDistance / 1609.34).toFixed(2)} miles`);
-                        bestActualRoute = route;
-                        bestActualDistance = totalDistance;
-                    } else if (totalDistance < config.minDistanceMeters) {
-                        console.log(`[RouteFinder] Route ${i + 1} too short: ${(totalDistance / 1609.34).toFixed(2)} < ${(config.minDistanceMeters / 1609.34).toFixed(2)} miles`);
-                    } else if (totalDistance > config.maxDistanceMeters) {
-                        console.log(`[RouteFinder] Route ${i + 1} too long: ${(totalDistance / 1609.34).toFixed(2)} > ${(config.maxDistanceMeters / 1609.34).toFixed(2)} miles`);
+                        totalDistance <= config.maxDistanceMeters) {
+
+                        // Prefer routes closer to target (50km)
+                        if (totalDistance < bestActualDistance || bestRoute === null) {
+                            // Also check if this is actually better (closer to target)
+                            const currentDiff = Math.abs(totalDistance / 1000 - targetKm);
+                            const bestDiff = bestRoute
+                                ? Math.abs(bestActualDistance / 1000 - targetKm)
+                                : Infinity;
+
+                            if (currentDiff <= bestDiff || bestRoute === null) {
+                                console.log(`[RouteFinder] Route ${i + 1} is new best!`);
+                                bestRoute = candidate;
+                                bestActualDistance = totalDistance;
+                                bestRouteIndex = i;
+                            }
+                        }
+                    } else {
+                        if (totalDistance < config.minDistanceMeters) {
+                            console.log(`[RouteFinder] Route ${i + 1} too short: ${distanceKm.toFixed(1)} km < ${(config.minDistanceMeters / 1000).toFixed(1)} km`);
+                        } else {
+                            console.log(`[RouteFinder] Route ${i + 1} too long: ${distanceKm.toFixed(1)} km > ${(config.maxDistanceMeters / 1000).toFixed(1)} km`);
+                        }
                     }
                 } else {
                     console.warn(`[RouteFinder] Route ${i + 1} returned no routes from Directions API`);
@@ -571,8 +547,8 @@ export async function findOptimalRoute(
                         status: 'finding_route',
                         tacoBellsFound: allTacoBells.length,
                         apiCallsUsed: apiCallCount,
-                        routesEvaluated: routesEvaluated,
-                        message: `Evaluating routes... (${apiCallCount} API calls)`,
+                        routesEvaluated: candidateRoutes.length,
+                        message: `Verifying routes... (${apiCallCount} API calls)`,
                     });
                 }
             } catch (error) {
@@ -581,13 +557,17 @@ export async function findOptimalRoute(
             }
         }
 
-        // Step 5: Return best route or error
-        if (bestActualRoute) {
+        // Step 4: Return best route
+        if (bestRoute) {
+            const distanceKm = bestActualDistance / 1000;
+            const distanceMiles = bestActualDistance / 1609.34;
+
             console.log('[RouteFinder] SUCCESS! Found optimal route:', {
-                tacoBells: bestActualRoute.path.length - 1,
-                totalDistanceMiles: (bestActualDistance / 1609.34).toFixed(2),
+                tacoBells: bestRoute.stops.length - 1,
+                totalDistanceKm: distanceKm.toFixed(1),
+                totalDistanceMiles: distanceMiles.toFixed(2),
                 apiCallsUsed: apiCallCount,
-                routesEvaluated,
+                routeIndex: bestRouteIndex + 1,
             });
 
             if (onProgress) {
@@ -595,21 +575,25 @@ export async function findOptimalRoute(
                     status: 'complete',
                     tacoBellsFound: allTacoBells.length,
                     apiCallsUsed: apiCallCount,
-                    routesEvaluated: routesEvaluated,
-                    message: `Route found! ${bestActualRoute.path.length - 1} Taco Bells, ${(bestActualDistance / 1609.34).toFixed(1)} miles`,
+                    routesEvaluated: candidateRoutes.length,
+                    message: `Route found! ${bestRoute.stops.length - 1} Taco Bells, ${distanceKm.toFixed(1)} km (${distanceMiles.toFixed(1)} miles)`,
                 });
             }
 
+            // Remove duplicate start at end
+            const routeWithoutDuplicate = bestRoute.stops.slice(0, -1);
+
             return {
                 success: true,
-                route: bestActualRoute.path.slice(0, -1), // Remove duplicate start at end
+                route: routeWithoutDuplicate,
                 totalDistance: bestActualDistance,
             };
-        } else if (bestRoute) {
-            // Fall back to estimated route if API calls failed
-            console.warn('[RouteFinder] No verified route found, falling back to estimated route:', {
-                tacoBells: bestRoute.path.length - 1,
-                estimatedDistanceMiles: (bestRoute.estimatedDistance / 1609.34).toFixed(2),
+        } else {
+            // Fall back to best Haversine-estimated route if no API route verified
+            const bestEstimate = topCandidates[0];
+            console.warn('[RouteFinder] No verified route found, falling back to best estimated route:', {
+                tacoBells: bestEstimate.stops.length - 1,
+                estimatedDistanceKm: (bestEstimate.totalDistance / 1000).toFixed(1),
                 apiCallsUsed: apiCallCount,
             });
 
@@ -618,20 +602,18 @@ export async function findOptimalRoute(
                     status: 'complete',
                     tacoBellsFound: allTacoBells.length,
                     apiCallsUsed: apiCallCount,
-                    routesEvaluated: routesEvaluated,
-                    message: `Route found (estimated)! ${bestRoute.path.length - 1} Taco Bells`,
+                    routesEvaluated: candidateRoutes.length,
+                    message: `Route found (estimated)! ${bestEstimate.stops.length - 1} Taco Bells`,
                 });
             }
 
+            const routeWithoutDuplicate = bestEstimate.stops.slice(0, -1);
+
             return {
                 success: true,
-                route: bestRoute.path.slice(0, -1), // Remove duplicate start at end
-                totalDistance: bestRoute.estimatedDistance,
+                route: routeWithoutDuplicate,
+                totalDistance: bestEstimate.totalDistance,
             };
-        } else {
-            const error = `No valid route found. Evaluated ${routesEvaluated} routes but none met distance constraints.`;
-            console.error('[RouteFinder] FAILED:', error);
-            throw new Error(error);
         }
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';

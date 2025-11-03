@@ -55,9 +55,8 @@ function SortableWaypointItem({
     <div
       ref={setNodeRef}
       style={style}
-      className={`bg-white border border-gray-200 rounded-lg p-3 mb-2 shadow-sm ${
-        isDragging ? 'shadow-lg' : ''
-      }`}
+      className={`bg-white border border-gray-200 rounded-lg p-3 mb-2 shadow-sm ${isDragging ? 'shadow-lg' : ''
+        }`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-start gap-3 flex-1 min-w-0">
@@ -86,7 +85,14 @@ function SortableWaypointItem({
                 Waypoint {waypoint.order + 1}
               </span>
             </div>
-            <p className="text-sm text-gray-600 truncate">{waypoint.location.address}</p>
+            {waypoint.location.name ? (
+              <>
+                <p className="text-sm font-medium text-gray-700">{waypoint.location.name}</p>
+                <p className="text-sm text-gray-600 truncate">{waypoint.location.address}</p>
+              </>
+            ) : (
+              <p className="text-sm text-gray-600 truncate">{waypoint.location.address}</p>
+            )}
             {segmentDistance !== undefined && (
               <p className="text-xs text-gray-500 mt-1">
                 To next: {formatDistance(segmentDistance)}

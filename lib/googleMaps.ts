@@ -1,5 +1,48 @@
 import { Location } from '@/types';
 
+/**
+ * Extract street address (street number and name) from a Google Places place object
+ * Always builds from address_components using only street_number and route
+ */
+export function extractAddressFromPlace(place: {
+    name?: string;
+    formatted_address?: string;
+    vicinity?: string;
+    address_components?: Array<{
+        long_name: string;
+        types: string[];
+    }>;
+}): string {
+    if (!place.address_components || place.address_components.length === 0) {
+        return '';
+    }
+
+    let streetNumber = '';
+    let streetName = '';
+
+    // Extract street_number and route from address_components
+    place.address_components.forEach(component => {
+        if (component.types.includes('street_number')) {
+            streetNumber = component.long_name;
+        }
+        if (component.types.includes('route')) {
+            streetName = component.long_name;
+        }
+    });
+
+    // Combine street number and name
+    // If we have both, combine them; if only route exists, use that; otherwise return empty
+    if (streetNumber && streetName) {
+        return `${streetNumber} ${streetName}`;
+    } else if (streetName) {
+        // Some places might not have a street number, just use the route
+        return streetName;
+    } else {
+        // No street address components available
+        return '';
+    }
+}
+
 export interface DirectionsRequest {
     origin: Location;
     destination: Location;
@@ -171,6 +214,11 @@ export async function getPlaceDetails(placeId: string): Promise<{
         };
     };
     types?: string[];
+    vicinity?: string;
+    address_components?: Array<{
+        long_name: string;
+        types: string[];
+    }>;
 }> {
     const params = new URLSearchParams({
         action: 'details',

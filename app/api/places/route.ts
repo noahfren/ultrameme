@@ -57,7 +57,7 @@ export async function GET(request: NextRequest) {
                 );
             }
 
-            const fields = 'name,formatted_address,geometry,place_id,types';
+            const fields = 'name,formatted_address,geometry,place_id,types,address_components,vicinity';
             const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=${fields}&key=${apiKey}`;
 
             const response = await fetch(url);

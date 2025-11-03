@@ -2,6 +2,7 @@ export interface Location {
     lat: number;
     lng: number;
     address: string;
+    name?: string; // Optional business/place name
 }
 
 export interface Waypoint {
@@ -12,7 +13,9 @@ export interface Waypoint {
 
 export interface RouteSegment {
     from: string;
+    fromName?: string;
     to: string;
+    toName?: string;
     distance: number; // in meters
 }
 
@@ -48,8 +51,8 @@ export interface RouteSearchProgress {
 }
 
 export interface RouteFinderConfig {
-    minDistanceMeters: number; // 48280 meters (30 miles)
-    maxDistanceMeters: number; // 54717 meters (34 miles)
+    minDistanceMeters: number; // 50000 meters (50km hard minimum)
+    maxDistanceMeters: number; // 55000 meters (~34 miles)
     minTacoBells: number; // 8
     maxTacoBells: number; // 10
     searchRadiusMiles: number; // 15
